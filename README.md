@@ -63,7 +63,7 @@ It detects **33 body landmarks** using Google's MediaPipe Pose model, calculates
 
 **1. Clone the repository**
 ```bash
-git clone https://github.com/your-username/ai-fitness-trainer.git
+git clone https://github.com/gsanika/Ai-Fitness-Trainee.git
 cd ai-fitness-trainer
 ```
 
@@ -164,24 +164,6 @@ The Streamlit dashboard reads your saved session JSON files and shows:
 streamlit run dashboard.py
 ```
 
----
-
-## 🔮 Roadmap
-
-- [ ] Voice feedback using pyttsx3
-- [ ] ML-based pose classification with TFLite
-- [ ] Workout recommendation engine
-- [ ] Mobile support via MediaPipe Tasks API
-- [ ] Real-time posture scoring (0–100)
-- [ ] Multi-person detection
-
----
-
-## 📄 License
-
-MIT License — free to use, modify, and distribute.
-
----
 
 ## 🙌 Acknowledgements
 
