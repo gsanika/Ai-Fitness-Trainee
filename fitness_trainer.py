@@ -6,9 +6,16 @@ import json
 import os
 from datetime import datetime
 from collections import deque
+import json
+import time
+
+
+# ─────────────────────────────────────────────
+# ANGLE CALCULATION
+# ─────────────────────────────────────────────
 
 def calculate_angle(a, b, c):
-    """Calculate the angle at joint b, given three points a, b, c."""
+    """Calculate the angle at joint b, given three points a, b, c.ote"""
     a = np.array(a)
     b = np.array(b)
     c = np.array(c)
@@ -25,6 +32,11 @@ def get_landmark(landmarks, idx, w, h):
     """Return (x, y) pixel coords for a given landmark index."""
     lm = landmarks[idx]
     return [lm.x * w, lm.y * h]
+
+
+# ─────────────────────────────────────────────
+# EXERCISE DETECTORS
+# ─────────────────────────────────────────────
 
 class ExerciseDetector:
     def __init__(self):
@@ -528,6 +540,7 @@ class ElbowKneeDetector(ExerciseDetector):
             "errors": self.form_errors
         }
 
+
 class ShoulderPressDetector(ExerciseDetector):
     """
     Elbow angle at shoulder height:
@@ -641,6 +654,11 @@ class PlankDetector(ExerciseDetector):
             "errors": self.form_errors
         }
 
+
+# ─────────────────────────────────────────────
+# CALORIES ESTIMATION
+# ─────────────────────────────────────────────
+
 CALORIES_PER_REP = {
     "SQUAT":          0.32,
     "PUSH-UP":        0.29,
@@ -657,6 +675,10 @@ CALORIES_PER_REP = {
 def estimate_calories(exercise_name, reps):
     return round(CALORIES_PER_REP.get(exercise_name, 0.2) * reps, 2)
 
+
+# ─────────────────────────────────────────────
+# SESSION LOGGER
+# ─────────────────────────────────────────────
 
 class SessionLogger:
     def __init__(self, log_dir="workout_logs"):
@@ -683,6 +705,11 @@ class SessionLogger:
         print(f"\n✅ Session saved to: {filename}")
         return filename
 
+
+# ─────────────────────────────────────────────
+# UI DRAWING HELPERS
+# ─────────────────────────────────────────────
+
 def draw_rounded_rect(img, x, y, w, h, r, color, alpha=0.6):
     overlay = img.copy()
     cv2.rectangle(overlay, (x + r, y), (x + w - r, y + h), color, -1)
@@ -697,7 +724,7 @@ def draw_rounded_rect(img, x, y, w, h, r, color, alpha=0.6):
 def draw_ui(frame, result, fps, elapsed, total_calories):
     h, w = frame.shape[:2]
 
-   
+    # ── TOP BAR ──────────────────────────────────
     draw_rounded_rect(frame, 0, 0, w, 64, 0, (15, 15, 30), alpha=0.85)
     cv2.putText(frame, "AI FITNESS TRAINER", (20, 42),
                 cv2.FONT_HERSHEY_DUPLEX, 1.1, (0, 220, 255), 2, cv2.LINE_AA)
@@ -708,31 +735,34 @@ def draw_ui(frame, result, fps, elapsed, total_calories):
     cv2.putText(frame, f"{mins:02d}:{secs:02d}", (w - 260, 42),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 180), 2, cv2.LINE_AA)
 
-   
+    # ── LEFT PANEL – REP COUNTER ──────────────────
     draw_rounded_rect(frame, 10, 80, 200, 180, 12, (20, 20, 50), alpha=0.8)
 
     cv2.putText(frame, result["name"], (20, 108),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 200, 255), 2, cv2.LINE_AA)
 
-   
+    # Big rep number
     rep_str = str(result["count"])
     cv2.putText(frame, rep_str, (55, 200),
                 cv2.FONT_HERSHEY_DUPLEX, 3.5, (255, 255, 255), 4, cv2.LINE_AA)
     cv2.putText(frame, "REPS", (68, 235),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (140, 140, 180), 1, cv2.LINE_AA)
 
+    # ── LEFT PANEL – ANGLE ────────────────────────
     draw_rounded_rect(frame, 10, 275, 200, 90, 12, (20, 20, 50), alpha=0.8)
     cv2.putText(frame, result["angle_label"], (20, 300),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (140, 140, 200), 1, cv2.LINE_AA)
     cv2.putText(frame, f"{result['angle']}°", (20, 345),
                 cv2.FONT_HERSHEY_DUPLEX, 1.6, (0, 255, 200), 2, cv2.LINE_AA)
 
+    # ── LEFT PANEL – CALORIES ─────────────────────
     draw_rounded_rect(frame, 10, 380, 200, 80, 12, (20, 20, 50), alpha=0.8)
     cv2.putText(frame, "CALORIES", (20, 405),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (140, 140, 200), 1, cv2.LINE_AA)
     cv2.putText(frame, f"{total_calories:.1f} kcal", (18, 445),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 190, 50), 2, cv2.LINE_AA)
 
+    # ── BOTTOM FEEDBACK BAR ───────────────────────
     form_color = (0, 220, 100) if result["correct_form"] else (0, 80, 255)
     form_label = "✓ GOOD FORM" if result["correct_form"] else "✗ CORRECT FORM"
     draw_rounded_rect(frame, 0, h - 70, w, 70, 0, (15, 15, 40), alpha=0.85)
@@ -742,7 +772,7 @@ def draw_ui(frame, result, fps, elapsed, total_calories):
     cv2.putText(frame, form_label, (w - 230, h - 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, form_color, 2, cv2.LINE_AA)
 
-
+    # ── STAGE PILL ────────────────────────────────
     stage_text = (result["stage"] or "---").upper()
     stage_col  = (0, 200, 100) if result["stage"] == "up" else (0, 120, 255)
     draw_rounded_rect(frame, w // 2 - 60, h - 140, 120, 40, 10, stage_col, alpha=0.75)
@@ -768,6 +798,11 @@ def draw_controls(frame):
     for i, c in enumerate(controls):
         cv2.putText(frame, c, (w - 310, h - 200 + i * 24),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (120, 120, 160), 1, cv2.LINE_AA)
+
+
+# ─────────────────────────────────────────────
+# MAIN APPLICATION
+# ─────────────────────────────────────────────
 
 def main():
     mp_pose    = mp.solutions.pose
@@ -806,6 +841,9 @@ def main():
     logger        = SessionLogger()
     session_start = time.time()
     prev_time     = time.time()
+
+    # --- NEW: live state file path ---
+    LIVE_STATE_FILE = "live_state.json"
 
     print("\n🏋️  AI FITNESS TRAINER STARTED")
     print("Controls: [1-9,0] switch exercise | [R] reset | [S] save | [ESC] quit\n")
@@ -857,6 +895,17 @@ def main():
             for i in range(len(detectors))
         )
 
+        # --- NEW: write live state for dashboard ---
+        live_state = {
+            "timestamp": time.time(),
+            "exercise": result["name"],
+            "reps": result["count"],
+            "calories": total_cal,
+            "active": True
+        }
+        with open(LIVE_STATE_FILE, "w") as f:
+            json.dump(live_state, f)
+
         # Draw UI
         draw_ui(frame, result, fps, elapsed, total_cal)
         draw_exercise_menu(frame, exercise_names, current_ex)
@@ -898,6 +947,17 @@ def main():
                     estimate_calories(exercise_names[i], det.counter)
                 )
             logger.save()
+
+    # --- NEW: write final inactive state ---
+    final_state = {
+        "timestamp": time.time(),
+        "exercise": "SESSION ENDED",
+        "reps": 0,
+        "calories": 0,
+        "active": False
+    }
+    with open(LIVE_STATE_FILE, "w") as f:
+        json.dump(final_state, f)
 
     cap.release()
     cv2.destroyAllWindows()
