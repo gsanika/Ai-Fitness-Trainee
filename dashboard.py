@@ -1,3 +1,7 @@
+# Add this import at the top of your file (if not already present)
+import subprocess
+import sys
+import platform
 import streamlit as st
 import json
 import os
@@ -6,6 +10,8 @@ import random
 import pandas as pd
 from datetime import datetime, timedelta
 from collections import defaultdict
+
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="AI Fitness Trainer",
     page_icon="🏋️",
@@ -13,6 +19,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ── Custom CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;600;700&display=swap');
@@ -36,6 +43,7 @@ h1, h2, h3 { font-family: 'Bebas Neue', sans-serif; letter-spacing: 2px; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Constants ─────────────────────────────────────────────────────────────────
 LOG_DIR = "workout_logs"
 
 ALL_EXERCISES = [
@@ -146,6 +154,7 @@ EXERCISE_GUIDE = {
 }
 
 
+# ── Data helpers ──────────────────────────────────────────────────────────────
 def load_sessions():
     if not os.path.exists(LOG_DIR):
         return []
@@ -191,15 +200,48 @@ def compute_streak(sessions):
         streak += 1
         check -= timedelta(days=1)
     return streak
-    
+
+
+# ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown('<div class="sidebar-title">🏋️ AI FITNESS</div>', unsafe_allow_html=True)
     st.markdown("---")
     page = st.radio("Navigate", ["📊 Dashboard", "📅 History", "💡 Exercise Guide", "⚙️ Settings"])
     st.markdown("---")
+
+    # ---------- REPLACED QUICK START SECTION ----------
     st.markdown("**Quick Start**")
-    st.code("python fitness_trainer.py", language="bash")
+    # Use session state to avoid repeated launch attempts
+    if "launch_msg" not in st.session_state:
+        st.session_state.launch_msg = ""
+
+    if st.button("▶️ Launch Fitness Trainer", use_container_width=True):
+        try:
+            # Determine OS and build command to open a new terminal and run the script
+            system = platform.system()
+            script = "fitness_trainer.py"
+            if system == "Windows":
+                cmd = ["start", "cmd", "/k", "python", script]
+                subprocess.Popen(cmd, shell=True)
+            elif system == "Darwin":  # macOS
+                cmd = ["open", "-a", "Terminal", "python", script]
+                subprocess.Popen(cmd)
+            else:  # Linux (assumes gnome-terminal)
+                cmd = ["gnome-terminal", "--", "python", script]
+                subprocess.Popen(cmd)
+            st.session_state.launch_msg = "✅ Trainer launched in a new window."
+        except Exception as e:
+            st.session_state.launch_msg = f"❌ Could not launch: {e}. Make sure the script is in the same folder."
+
+    if st.session_state.launch_msg:
+        if "✅" in st.session_state.launch_msg:
+            st.success(st.session_state.launch_msg)
+        else:
+            st.error(st.session_state.launch_msg)
+
     st.markdown('<div class="tip-box">Press <b>1–9, 0</b> to switch exercise<br><b>S</b> to save · <b>R</b> to reset · <b>ESC</b> quit</div>', unsafe_allow_html=True)
+    # ---------- END OF REPLACEMENT ----------
+
     st.markdown("---")
     st.markdown("**Exercise Keys**")
     for ex, key in EXERCISE_KEY.items():
@@ -208,12 +250,18 @@ with st.sidebar:
     st.caption("v2.0 · AI Fitness Trainer · 10 Exercises")
 
 
+
+# ── Load data ─────────────────────────────────────────────────────────────────
 sessions = load_sessions()
 using_demo = len(sessions) == 0
 if using_demo:
     sessions = generate_demo_sessions()
     st.info("📊 Showing **demo data** — run `python fitness_trainer.py` and press **S** to save a real session.", icon="ℹ️")
 
+
+# ════════════════════════════════════════════════════
+# PAGE: DASHBOARD
+# ════════════════════════════════════════════════════
 if page == "📊 Dashboard":
     st.markdown("# 📊 WORKOUT DASHBOARD")
 
@@ -329,6 +377,10 @@ if page == "📊 Dashboard":
                 <div class="ex-reps" style="font-size:1.8rem">{bottom[1]['reps']} reps</div>
             </div>""", unsafe_allow_html=True)
 
+
+# ════════════════════════════════════════════════════
+# PAGE: HISTORY
+# ════════════════════════════════════════════════════
 elif page == "📅 History":
     st.markdown("# 📅 WORKOUT HISTORY")
 
@@ -366,6 +418,10 @@ elif page == "📅 History":
                                 <div class="ex-cal">🔥 {data['calories']} kcal</div>
                             </div>""", unsafe_allow_html=True)
 
+
+# ════════════════════════════════════════════════════
+# PAGE: EXERCISE GUIDE
+# ════════════════════════════════════════════════════
 elif page == "💡 Exercise Guide":
     st.markdown("# 💡 EXERCISE GUIDE")
     st.caption("All 10 exercises supported by the AI Fitness Trainer.")
@@ -395,6 +451,10 @@ elif page == "💡 Exercise Guide":
                 st.markdown(f'<div class="tip-box"><b>📸 Camera tip:</b><br>{info["camera"]}</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="warn-box"><b>⌨️ Shortcut:</b> Press <b>{key_num}</b> in the trainer window to switch to this exercise.</div>', unsafe_allow_html=True)
 
+
+# ════════════════════════════════════════════════════
+# PAGE: SETTINGS
+# ════════════════════════════════════════════════════
 elif page == "⚙️ Settings":
     st.markdown("# ⚙️ SETTINGS")
 
