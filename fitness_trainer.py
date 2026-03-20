@@ -6,8 +6,409 @@ import json
 import os
 from datetime import datetime
 from collections import deque
-import json
-import time
+import threading
+import queue
+import random
+
+# ── Voice backend: prefer pyttsx3 (offline), fall back to gTTS+pygame ────────
+try:
+    import pyttsx3
+    _VOICE_ENGINE = "pyttsx3"
+except ImportError:
+    try:
+        from gtts import gTTS
+        import pygame
+        _VOICE_ENGINE = "gtts"
+    except ImportError:
+        _VOICE_ENGINE = None
+
+
+# ─────────────────────────────────────────────
+# VOICE TRAINER  — Full Session Coach
+# ─────────────────────────────────────────────
+
+class VoiceTrainer:
+    """
+    A real personal trainer voice that talks throughout the entire session.
+    Runs TTS in a background daemon thread — never blocks the CV loop.
+
+    Coaching layers:
+      1. SESSION     – welcome, warm-up reminder, session summary
+      2. EXERCISE    – setup instructions when switching exercises
+      3. MOVEMENT    – calls out each phase (going down, push up, hold it)
+      4. REP COUNT   – counts reps aloud + milestone praise
+      5. FORM        – specific correction cues (throttled, not spammy)
+      6. ENCOURAGEMENT – random hype every few reps to keep energy up
+      7. BREATHING   – reminds to breathe during hard sets
+      8. IDLE        – motivation nudge when nothing happens for a while
+      9. PACE        – tells user to speed up or slow down based on rep rate
+    """
+
+    # ── 1. SESSION CUES ───────────────────────────────────────────────────────
+    SESSION_START = [
+        "Hey! Welcome to your AI fitness session. I'll be coaching you the whole way. Let's warm up and get moving!",
+        "Welcome back! Your personal trainer is ready. Let's have a great session today!",
+        "Let's go! I'll guide you through every exercise. Give me everything you've got!",
+    ]
+
+    SESSION_END_TEMPLATES = [
+        "Session complete! Incredible work. You did {reps} reps and torched {cal} calories. Go get some water!",
+        "That's a wrap! {reps} reps done and {cal} calories burned. You should be proud of that effort!",
+        "Workout finished! {reps} total reps, {cal} calories. Rest up and come back stronger tomorrow!",
+    ]
+
+    WARMUP_REMINDER = [
+        "Before we start, make sure you're warmed up. Roll those shoulders and loosen up.",
+        "Step in front of the camera so I can see your full body. Let's do this!",
+    ]
+
+    # ── 2. EXERCISE SETUP ─────────────────────────────────────────────────────
+    SETUP = {
+        "SQUAT": [
+            "Squats! Feet shoulder width apart, toes slightly out. Weight in your heels. Back straight. Ready? Go!",
+            "Time for squats. Stand tall, chest up, core braced. Drop it low and drive back up!",
+            "Squat time! Imagine sitting back into a chair. Keep those knees tracking over your toes.",
+        ],
+        "PUSH-UP": [
+            "Push-ups! Get into a high plank. Hands just wider than shoulders. Body is one straight line. Let's go!",
+            "Push-up position! Lock your core, squeeze your glutes. Lower your chest to the floor and push it back up!",
+            "Time for push-ups. Keep your elbows at forty five degrees. Don't flare them out wide.",
+        ],
+        "BICEP CURL": [
+            "Bicep curls! Stand tall, shoulders back. Pin those elbows to your sides and curl all the way up!",
+            "Curl time! No swinging, no momentum. Slow and controlled. Really squeeze at the top.",
+            "Bicep curls. Keep your upper arms totally still. Only your forearms should move. Let's go!",
+        ],
+        "LUNGE": [
+            "Lunges! Step forward, drop the back knee toward the floor. Keep your front shin vertical. Go!",
+            "Lunge time! Big step forward. Ninety degree angles on both knees. Stay upright, chest up!",
+            "Forward lunges. Make sure that front knee stays directly above your ankle. Don't let it cave in.",
+        ],
+        "JUMPING JACK": [
+            "Jumping jacks! Arms and legs go out simultaneously. Full range of motion. Stay light on your feet!",
+            "Jack it out! Reach those arms all the way up overhead. Land softly each time.",
+            "Jumping jacks! This is cardio, keep the pace up. Arms up, feet wide, then back together!",
+        ],
+        "HIGH KNEES": [
+            "High knees! Drive those knees up to hip height. Pump your arms hard. Quick feet!",
+            "Let's go, high knees! Stay on the balls of your feet. Fast and explosive. Drive those knees up!",
+            "High knees! Core tight, posture upright. Don't lean back. Get those knees as high as you can!",
+        ],
+        "TWIST JUMP": [
+            "Twist jumps! Shoulders rotate one way while your hips go the other. Big rotation each side!",
+            "Twist and jump! Full shoulder turn. Feel that core engage with every twist.",
+            "Twist jumps! Keep your feet together. Jump and rotate as far as you can each side.",
+        ],
+        "ELBOW-KNEE": [
+            "Elbow to knee! Crunch diagonally across your body. Left elbow meets right knee and vice versa!",
+            "Cross body crunches! Slow and deliberate. Feel that oblique squeeze every single rep.",
+            "Elbow knee! This one is all about rotation. Pull that elbow and knee together hard each time.",
+        ],
+        "SHOULDER PRESS": [
+            "Shoulder press! Start with elbows at ninety degrees, hands at ear level. Press straight overhead!",
+            "Press time! Brace that core, don't arch your back. Drive those arms up until they're fully locked out.",
+            "Overhead press! Keep your wrists straight and stacked over your elbows. Press it up strong!",
+        ],
+        "PLANK": [
+            "Plank position! Straight line from your shoulders all the way to your ankles. Squeeze absolutely everything!",
+            "Plank hold! Hips level. No sagging, no piking. Breathe steadily. You've got this!",
+            "Plank time! Think about pulling your belly button to your spine. Squeeze your glutes too. Hold it!",
+        ],
+    }
+
+    # ── 3. MOVEMENT PHASE CUES ────────────────────────────────────────────────
+    PHASE_CUES = {
+        "SQUAT": {
+            "going_down": ["Sit back and down!", "Lower it!", "Drop into the squat!"],
+            "bottom":     ["Hold it there!", "Good depth!", "Now drive up!"],
+            "going_up":   ["Push through your heels!", "Drive up!", "Stand tall!"],
+        },
+        "PUSH-UP": {
+            "going_down": ["Lower your chest!", "Control it down!", "Slow on the way down!"],
+            "bottom":     ["Chest near the floor!", "Now push!", "Explode up!"],
+            "going_up":   ["Push it up!", "Lock those arms out!", "Full extension!"],
+        },
+        "BICEP CURL": {
+            "going_up":   ["Curl it up!", "Squeeze at the top!", "All the way up!"],
+            "top":        ["Hold the squeeze!", "Feel that bicep!", "Squeeze harder!"],
+            "going_down": ["Slow on the way down!", "Control it!", "Don't drop it!"],
+        },
+        "SHOULDER PRESS": {
+            "going_up":   ["Press it overhead!", "Drive it up!", "Lock it out!"],
+            "top":        ["Full extension!", "Arms locked!", "Good!"],
+            "going_down": ["Slow and controlled!", "Back to ninety degrees!", "Reset!"],
+        },
+        "PLANK": {
+            "hold":       ["Hold it strong!", "Squeeze everything!", "Don't give up!", "Stay tight!", "Breathe!"],
+        },
+        "LUNGE": {
+            "going_down": ["Step and drop!", "Back knee toward the floor!", "Control the descent!"],
+            "bottom":     ["Good depth!", "Now push back up!", "Drive through that front heel!"],
+        },
+    }
+
+    # ── 4. REP COUNT CALLOUTS ─────────────────────────────────────────────────
+    REP_CALLOUTS = {
+        1:  ["One! Great start!", "One rep in. Keep it moving!"],
+        2:  ["Two!", "Two reps!"],
+        3:  ["Three!", "Three down!"],
+        4:  ["Four! Nice pace!", "Four reps, good!"],
+        5:  ["Five! Halfway to ten!", "Five reps, keep going!"],
+        6:  ["Six!", "Six reps!"],
+        7:  ["Seven! Don't slow down!", "Seven, push it!"],
+        8:  ["Eight! Almost at ten!", "Eight reps, two more!"],
+        9:  ["Nine! One more for ten!", "Nine! Come on!"],
+        10: ["Ten reps! Solid set!", "Ten! You're on fire!"],
+        12: ["Twelve! Going strong!", "A dozen reps!"],
+        15: ["Fifteen! Incredible effort!", "Fifteen reps, beast mode!"],
+        20: ["Twenty reps! You're a machine!", "Twenty! Absolutely crushing it!"],
+        25: ["Twenty five reps! Unreal!", "Twenty five! Push for thirty!"],
+        30: ["Thirty reps! That is seriously impressive!", "Thirty! You're a warrior!"],
+    }
+
+    # ── 5. FORM CORRECTIONS ───────────────────────────────────────────────────
+    CORRECTIONS = {
+        "Lean forward less!":        ["Chest up! You're folding forward.", "Back straight! Don't lean over."],
+        "Balance both knees evenly": ["Even it out! Both knees equally.", "Balance those knees!"],
+        "Keep body straight!":       ["Straight line! Hips are dropping.", "Core tight! Don't sag in the middle."],
+        "Balance both arms":         ["Both arms together! One is lagging.", "Match both sides!"],
+        "Curl both arms evenly":     ["Even curl! Both arms at the same speed.", "Keep both arms in sync!"],
+        "Spread feet wider!":        ["Feet wider! Match your arm position.", "Open those feet out!"],
+        "Lift knees higher!":        ["Higher! Get those knees to hip level.", "Drive the knees up more!"],
+        "Press both arms evenly":    ["Both arms together! One side is behind.", "Even press!"],
+        "Raise your hips!":          ["Hips up! You're sagging.", "Lift those hips, keep it straight!"],
+        "Lower your hips!":          ["Hips down! You're piking.", "Drop those hips to neutral!"],
+        "Keep knee behind toe":      ["Knee behind the toe! Don't let it shoot forward.", "Watch that knee!"],
+    }
+
+    # ── 6. ENCOURAGEMENT (fires every few reps randomly) ─────────────────────
+    HYPE = [
+        "Come on, let's go!",
+        "You're doing great, keep it up!",
+        "That's the way, nice and strong!",
+        "Push through it!",
+        "Don't slow down now!",
+        "Looking good, stay focused!",
+        "This is where it counts, keep going!",
+        "Every rep makes you stronger!",
+        "You've got more in the tank, let's go!",
+        "Stay with it!",
+        "Beautiful form, keep that up!",
+        "Dig deep, push through!",
+        "Almost there, don't stop!",
+        "That's how you do it!",
+        "Incredible effort, keep moving!",
+    ]
+
+    # ── 7. BREATHING REMINDERS ────────────────────────────────────────────────
+    BREATHING = [
+        "Don't forget to breathe! Exhale on the effort.",
+        "Breathe! Inhale down, exhale up.",
+        "Keep breathing steadily, don't hold your breath.",
+        "Breathe through it! Out on the hard part.",
+    ]
+
+    # ── 8. IDLE / MOTIVATION ──────────────────────────────────────────────────
+    IDLE = [
+        "Hey, I'm still here! Let's get back to it.",
+        "Come on, no rest yet! Keep those reps coming.",
+        "You stopped? Get back in there, let's go!",
+        "Don't quit now! You were doing so well.",
+        "One more set! You can do this.",
+        "Rest is earned, not given. Keep going!",
+    ]
+
+    # ── 9. PACE FEEDBACK ──────────────────────────────────────────────────────
+    PACE_TOO_FAST = [
+        "Slow down a little! Control is more important than speed.",
+        "Ease up the pace, focus on form over speed.",
+        "Slow it down! Make every rep count.",
+    ]
+    PACE_TOO_SLOW = [
+        "Pick up the pace a bit! Keep that energy up.",
+        "A little faster! Don't let momentum drop.",
+        "Drive the tempo! Stay sharp.",
+    ]
+
+    # ── INIT ──────────────────────────────────────────────────────────────────
+    def __init__(self, rate=150, volume=1.0):
+        self._q                  = queue.Queue(maxsize=4)
+        self._rate               = rate
+        self._volume             = volume
+        self._engine             = None
+        self._last_spoke         = 0.0
+        self._min_gap            = 2.5    # min seconds between any cues
+        self._last_correction    = 0.0
+        self._correction_gap     = 7.0   # don't nag about form more than this
+        self._last_hype          = 0.0
+        self._hype_gap           = 15.0  # encouragement every ~15s
+        self._last_breathing     = 0.0
+        self._breathing_gap      = 30.0  # breathing reminder every 30s
+        self._last_phase         = None  # track movement phase changes
+        self._phase_said         = {}    # avoid repeating same phase cue
+        self._rep_pace_times     = deque(maxlen=6)  # timestamps of last 6 reps
+        self._enabled            = _VOICE_ENGINE is not None
+
+        if not self._enabled:
+            print("⚠️  pyttsx3 not found. Run: pip install pyttsx3")
+            return
+
+        if _VOICE_ENGINE == "gtts":
+            try:
+                pygame.mixer.init()
+            except Exception:
+                self._enabled = False
+                return
+
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    # ── PUBLIC API ────────────────────────────────────────────────────────────
+
+    def say(self, text: str, priority: bool = False, min_gap: float = None):
+        """Queue a phrase. priority=True clears queue first."""
+        if not self._enabled:
+            return
+        now = time.time()
+        gap = min_gap if min_gap is not None else self._min_gap
+        if now - self._last_spoke < gap and not priority:
+            return
+        try:
+            if priority:
+                while not self._q.empty():
+                    try: self._q.get_nowait()
+                    except queue.Empty: break
+            self._q.put_nowait(text)
+        except queue.Full:
+            pass
+
+    def on_session_start(self):
+        self.say(random.choice(self.SESSION_START), priority=True)
+        threading.Timer(5.0, lambda: self.say(random.choice(self.WARMUP_REMINDER))).start()
+
+    def on_session_end(self, total_reps: int, total_cal: float):
+        tmpl = random.choice(self.SESSION_END_TEMPLATES)
+        self.say(tmpl.format(reps=total_reps, cal=int(total_cal)), priority=True)
+        time.sleep(5)
+
+    def on_exercise_switch(self, exercise: str):
+        options = self.SETUP.get(exercise, [f"Starting {exercise.lower()}. Get ready!"])
+        self.say(random.choice(options), priority=True)
+        self._last_phase = None
+        self._phase_said.clear()
+        self._rep_pace_times.clear()
+
+    def on_rep(self, count: int, exercise: str):
+        """Called every time a new rep is completed."""
+        self._rep_pace_times.append(time.time())
+
+        # Count callout (specific numbers)
+        if count in self.REP_CALLOUTS:
+            self.say(random.choice(self.REP_CALLOUTS[count]), min_gap=1.5)
+        elif count % 5 == 0:
+            self.say(f"{count} reps! Keep it going!", min_gap=1.5)
+
+        # Encouragement hype every ~15 seconds
+        now = time.time()
+        if now - self._last_hype > self._hype_gap:
+            self._last_hype = now
+            threading.Timer(1.5, lambda: self.say(random.choice(self.HYPE))).start()
+
+        # Breathing reminder every 30s
+        if now - self._last_breathing > self._breathing_gap:
+            self._last_breathing = now
+            threading.Timer(2.0, lambda: self.say(random.choice(self.BREATHING))).start()
+
+        # Pace feedback (after at least 4 reps tracked)
+        if len(self._rep_pace_times) >= 4:
+            span = self._rep_pace_times[-1] - self._rep_pace_times[-4]
+            reps_per_min = (3 / span) * 60 if span > 0 else 0
+            fast_exercises = {"JUMPING JACK", "HIGH KNEES"}
+            slow_exercises = {"BICEP CURL", "SHOULDER PRESS", "SQUAT"}
+            if exercise in slow_exercises and reps_per_min > 40:
+                self.say(random.choice(self.PACE_TOO_FAST), min_gap=12.0)
+            elif exercise in fast_exercises and reps_per_min < 20:
+                self.say(random.choice(self.PACE_TOO_SLOW), min_gap=12.0)
+
+    def on_phase_change(self, exercise: str, stage: str):
+        """Called when movement stage changes (up→down etc.)."""
+        if stage == self._last_phase:
+            return
+        self._last_phase = stage
+
+        cues_map = self.PHASE_CUES.get(exercise, {})
+        # Map detector stage names → phase keys
+        phase_key = None
+        if stage in ("down", "closed", "rest"):
+            phase_key = "going_down"
+        elif stage in ("up", "open", "hold"):
+            phase_key = "going_up" if exercise != "PLANK" else "hold"
+        elif stage in ("bottom",):
+            phase_key = "bottom"
+
+        if phase_key and phase_key in cues_map:
+            # Only say the phase cue occasionally, not every single rep
+            last_said = self._phase_said.get(phase_key, 0)
+            if time.time() - last_said > 8.0:
+                self._phase_said[phase_key] = time.time()
+                self.say(random.choice(cues_map[phase_key]), min_gap=2.0)
+
+    def on_form_error(self, error: str):
+        """Called when a form error is detected."""
+        now = time.time()
+        if now - self._last_correction < self._correction_gap:
+            return
+        self._last_correction = now
+        options = self.CORRECTIONS.get(error, [error])
+        self.say(random.choice(options), priority=False, min_gap=2.0)
+
+    def on_good_form(self):
+        """Occasional praise when form is correct for a while."""
+        pass  # handled inside on_rep hype
+
+    def on_idle(self):
+        self.say(random.choice(self.IDLE), min_gap=8.0)
+
+    # ── WORKER THREAD ─────────────────────────────────────────────────────────
+
+    def _worker(self):
+        if _VOICE_ENGINE == "pyttsx3":
+            self._engine = pyttsx3.init()
+            self._engine.setProperty("rate",   self._rate)
+            self._engine.setProperty("volume", self._volume)
+            voices = self._engine.getProperty("voices")
+            # Prefer a clear male voice (David on Windows, Alex/Daniel on Mac)
+            preferred = ["david", "daniel", "alex", "mark", "george"]
+            for pref in preferred:
+                for v in voices:
+                    if pref in v.name.lower():
+                        self._engine.setProperty("voice", v.id)
+                        break
+
+        while True:
+            try:
+                text = self._q.get(timeout=1)
+            except queue.Empty:
+                continue
+
+            self._last_spoke = time.time()
+            try:
+                if _VOICE_ENGINE == "pyttsx3":
+                    self._engine.say(text)
+                    self._engine.runAndWait()
+                elif _VOICE_ENGINE == "gtts":
+                    import tempfile
+                    tts = gTTS(text=text, lang="en", slow=False)
+                    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as fp:
+                        tmp = fp.name
+                    tts.save(tmp)
+                    pygame.mixer.music.load(tmp)
+                    pygame.mixer.music.play()
+                    while pygame.mixer.music.get_busy():
+                        time.sleep(0.05)
+                    os.unlink(tmp)
+            except Exception as e:
+                print(f"[Voice] TTS error: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -842,11 +1243,26 @@ def main():
     session_start = time.time()
     prev_time     = time.time()
 
-    # --- NEW: live state file path ---
     LIVE_STATE_FILE = "live_state.json"
+
+    # ── Voice trainer ─────────────────────────────────────────────────────────
+    voice = VoiceTrainer(rate=150, volume=1.0)
+    voice.on_session_start()
+
+    # Voice state tracking
+    last_rep_count   = 0
+    last_idle_check  = time.time()
+    idle_timeout     = 10.0        # nudge if no rep for 10 seconds
+    last_error_text  = ""
+    last_stage       = None
+    good_form_streak = 0           # consecutive frames with correct form
 
     print("\n🏋️  AI FITNESS TRAINER STARTED")
     print("Controls: [1-9,0] switch exercise | [R] reset | [S] save | [ESC] quit\n")
+    if _VOICE_ENGINE:
+        print(f"🎙  Voice coaching: ON  ({_VOICE_ENGINE})")
+    else:
+        print("🔇  Voice coaching: OFF  (install pyttsx3 to enable)")
 
     result = {
         "name": exercise_names[current_ex],
@@ -855,6 +1271,9 @@ def main():
         "angle": 0.0, "angle_label": "Angle",
         "correct_form": True, "errors": []
     }
+
+    # Announce starting exercise after welcome finishes
+    threading.Timer(4.0, lambda: voice.on_exercise_switch(exercise_names[current_ex])).start()
 
     while True:
         ret, frame = cap.read()
@@ -868,7 +1287,6 @@ def main():
         output = pose.process(rgb)
 
         if output.pose_landmarks:
-            # Custom drawing style
             mp_drawing.draw_landmarks(
                 frame,
                 output.pose_landmarks,
@@ -883,28 +1301,66 @@ def main():
                 output.pose_landmarks.landmark, w, h
             )
 
-        # FPS
-        now      = time.time()
-        fps      = 1.0 / (now - prev_time + 1e-6)
+        # FPS / timing
+        now       = time.time()
+        fps       = 1.0 / (now - prev_time + 1e-6)
         prev_time = now
-        elapsed  = now - session_start
+        elapsed   = now - session_start
 
-        # Calories across all exercises
+        # Calories
         total_cal = sum(
             estimate_calories(exercise_names[i], detectors[i].counter)
             for i in range(len(detectors))
         )
 
-        # --- NEW: write live state for dashboard ---
+        # ── Voice coaching triggers ───────────────────────────────────────────
+        current_count = result["count"]
+        current_stage = result.get("stage")
+        exercise_name = result["name"]
+
+        # 1. New rep completed
+        if current_count > last_rep_count:
+            voice.on_rep(current_count, exercise_name)
+            last_rep_count  = current_count
+            last_idle_check = now
+
+        # 2. Movement phase change (going down / up / holding)
+        if current_stage != last_stage:
+            voice.on_phase_change(exercise_name, current_stage or "")
+            last_stage = current_stage
+
+        # 3. Form errors — specific corrections
+        if result.get("errors"):
+            voice.on_form_error(result["errors"][0])
+            good_form_streak = 0
+        else:
+            good_form_streak += 1
+
+        # 4. Idle nudge — no activity for idle_timeout seconds
+        if now - last_idle_check > idle_timeout:
+            voice.on_idle()
+            last_idle_check = now
+
+        # ── Live state write ──────────────────────────────────────────────────
         live_state = {
-            "timestamp": time.time(),
-            "exercise": result["name"],
-            "reps": result["count"],
-            "calories": total_cal,
-            "active": True
+            "timestamp":   time.time(),
+            "exercise":    result["name"],
+            "reps":        result["count"],
+            "calories":    total_cal,
+            "active":      True,
+            "stage":       result.get("stage") or "---",
+            "feedback":    result.get("feedback", ""),
+            "angle":       result.get("angle", 0.0),
+            "angle_label": result.get("angle_label", "Angle"),
+            "correct_form": result.get("correct_form", True),
+            "elapsed":     round(elapsed, 1),
+            "fps":         round(fps, 1),
         }
-        with open(LIVE_STATE_FILE, "w") as f:
-            json.dump(live_state, f)
+        try:
+            with open(LIVE_STATE_FILE, "w") as f:
+                json.dump(live_state, f)
+        except Exception:
+            pass
 
         # Draw UI
         draw_ui(frame, result, fps, elapsed, total_cal)
@@ -916,29 +1372,35 @@ def main():
         key = cv2.waitKey(1) & 0xFF
         if key == 27:   # ESC
             break
-        elif key == ord('1'):
-            current_ex = 0
-        elif key == ord('2'):
-            current_ex = 1
-        elif key == ord('3'):
-            current_ex = 2
-        elif key == ord('4'):
-            current_ex = 3
-        elif key == ord('5'):
-            current_ex = 4
-        elif key == ord('6'):
-            current_ex = 5
-        elif key == ord('7'):
-            current_ex = 6
-        elif key == ord('8'):
-            current_ex = 7
-        elif key == ord('9'):
-            current_ex = 8
-        elif key == ord('0'):
-            current_ex = 9
+
+        # ── Exercise switch keys ──────────────────────────────────────────────
+        new_ex = None
+        if   key == ord('1'): new_ex = 0
+        elif key == ord('2'): new_ex = 1
+        elif key == ord('3'): new_ex = 2
+        elif key == ord('4'): new_ex = 3
+        elif key == ord('5'): new_ex = 4
+        elif key == ord('6'): new_ex = 5
+        elif key == ord('7'): new_ex = 6
+        elif key == ord('8'): new_ex = 7
+        elif key == ord('9'): new_ex = 8
+        elif key == ord('0'): new_ex = 9
+
+        if new_ex is not None and new_ex != current_ex:
+            current_ex       = new_ex
+            last_rep_count   = detectors[current_ex].counter
+            last_idle_check  = now
+            last_error_text  = ""
+            last_stage       = None
+            good_form_streak = 0
+            voice.on_exercise_switch(exercise_names[current_ex])
+
         elif key == ord('r') or key == ord('R'):
             detectors[current_ex].reset()
+            last_rep_count = 0
+            voice.say(f"{exercise_names[current_ex].lower()} reset. Let's go again!")
             print(f"🔄 Reset {exercise_names[current_ex]} counter")
+
         elif key == ord('s') or key == ord('S'):
             for i, det in enumerate(detectors):
                 logger.update(
@@ -947,14 +1409,18 @@ def main():
                     estimate_calories(exercise_names[i], det.counter)
                 )
             logger.save()
+            voice.say("Session saved. Great effort today!")
 
-    # --- NEW: write final inactive state ---
+    # ── Session end ───────────────────────────────────────────────────────────
+    total_reps = sum(d.counter for d in detectors)
+    voice.on_session_end(total_reps, total_cal)
+
     final_state = {
         "timestamp": time.time(),
-        "exercise": "SESSION ENDED",
-        "reps": 0,
-        "calories": 0,
-        "active": False
+        "exercise":  "SESSION ENDED",
+        "reps":      0,
+        "calories":  0,
+        "active":    False
     }
     with open(LIVE_STATE_FILE, "w") as f:
         json.dump(final_state, f)
