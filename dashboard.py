@@ -11,6 +11,13 @@ import sys
 import platform
 import time
 
+# ── Auto-refresh: try streamlit-autorefresh, fall back to st.rerun loop ──────
+try:
+    from streamlit_autorefresh import st_autorefresh
+    _HAS_AUTOREFRESH = True
+except ImportError:
+    _HAS_AUTOREFRESH = False
+
 st.set_page_config(
     page_title="AI Fitness Trainer",
     page_icon="🏋️",
@@ -123,7 +130,7 @@ def read_live_state():
         if not os.path.exists(LIVE_STATE_FILE):
             return None
         mtime = os.path.getmtime(LIVE_STATE_FILE)
-        if time.time() - mtime > 3:   # older than 3 seconds → stale
+        if time.time() - mtime > 5:   # older than 5 seconds → stale
             return None
         with open(LIVE_STATE_FILE, "r") as f:
             state = json.load(f)
@@ -184,47 +191,70 @@ if using_demo:
 if page == "📊 Dashboard":
     st.markdown("# 📊 WORKOUT DASHBOARD")
 
-    # Check for live session
+    # ── Auto-refresh while live ───────────────────────────────────────────────
     live = read_live_state()
     if live:
-        # Auto‑refresh every 2 seconds while live data exists
-        st.markdown("""
-        <meta http-equiv="refresh" content="2">
-        <div style="background: #0a1f1a; padding: 10px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #00ff99;">
-            🔴 <b>Live session active</b> — dashboard refreshes automatically every 2 seconds.
+        if _HAS_AUTOREFRESH:
+            st_autorefresh(interval=1000, limit=None, key="live_refresh")
+        else:
+            # Fallback: button-triggered rerun hint
+            st.markdown(
+                '<meta http-equiv="refresh" content="1">',
+                unsafe_allow_html=True,
+            )
+
+        # ── Live banner ──────────────────────────────────────────────────────
+        form_color  = "#00ff88" if live.get("correct_form", True) else "#ff4444"
+        form_label  = "✓ GOOD FORM" if live.get("correct_form", True) else "✗ CHECK FORM"
+        elapsed_s   = live.get("elapsed", 0)
+        mins, secs  = divmod(int(elapsed_s), 60)
+
+        st.markdown(f"""
+        <div style="background:#0a1f1a;padding:14px 20px;border-radius:12px;
+                    margin-bottom:16px;border-left:5px solid #00ff99;
+                    display:flex;align-items:center;gap:16px;">
+            <span style="font-size:1.1rem">🔴 <b>LIVE SESSION</b></span>
+            <span style="color:#888;font-size:0.85rem">⏱ {mins:02d}:{secs:02d}</span>
+            <span style="color:#888;font-size:0.85rem">📡 {live.get('fps',0):.0f} fps</span>
+            <span style="color:{form_color};font-weight:700;margin-left:auto">{form_label}</span>
         </div>
         """, unsafe_allow_html=True)
 
-        # Show live stats in a prominent card
+        # ── 5 live metric cards ──────────────────────────────────────────────
         st.markdown('<div class="section-header">⚡ LIVE SESSION</div>', unsafe_allow_html=True)
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="value">{live.get('exercise', '?')}</div>
-                <div class="label">Current Exercise</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with col2:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="value">{live.get('reps', 0)}</div>
-                <div class="label">Reps This Session</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with col3:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="value">{live.get('calories', 0):.1f}</div>
-                <div class="label">Calories Burned</div>
-            </div>
-            """, unsafe_allow_html=True)
+        c1, c2, c3, c4, c5 = st.columns(5)
+        metrics = [
+            (live.get("exercise", "—"),               "Exercise"),
+            (live.get("reps", 0),                     "Reps"),
+            (f"{live.get('calories', 0):.1f}",        "Calories (kcal)"),
+            (f"{live.get('angle', 0):.1f}°",          live.get("angle_label", "Angle")),
+            ((live.get("stage") or "---").upper(),     "Stage"),
+        ]
+        for col, (val, label) in zip([c1, c2, c3, c4, c5], metrics):
+            with col:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="value" style="font-size:2rem">{val}</div>
+                    <div class="label">{label}</div>
+                </div>""", unsafe_allow_html=True)
 
-        # Option to stop the live session (kill the trainer process)
+        # ── Feedback bar ─────────────────────────────────────────────────────
+        feedback_txt = live.get("feedback", "")
+        if feedback_txt:
+            fback_bg = "#0d2b0d" if live.get("correct_form", True) else "#2b0d0d"
+            fback_bd = "#00ff88" if live.get("correct_form", True) else "#ff4444"
+            st.markdown(f"""
+            <div style="background:{fback_bg};border-left:4px solid {fback_bd};
+                        border-radius:0 10px 10px 0;padding:12px 18px;
+                        font-size:1.05rem;color:#e0ffe0;margin:8px 0 16px 0">
+                💬 {feedback_txt}
+            </div>""", unsafe_allow_html=True)
+
+        # ── Stop button ──────────────────────────────────────────────────────
         if st.button("🛑 Stop Session", type="primary"):
             try:
                 if platform.system() == "Windows":
-                    os.system("taskkill /f /im python.exe")  # be careful – kills all Python?
+                    os.system("taskkill /f /im python.exe")
                 else:
                     os.system("pkill -f fitness_trainer.py")
                 st.success("Session stopped.")
