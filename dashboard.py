@@ -10,7 +10,6 @@ import subprocess
 import sys
 import platform
 import time
-
 # ── Auto-refresh: try streamlit-autorefresh, fall back to st.rerun loop ──────
 try:
     from streamlit_autorefresh import st_autorefresh
